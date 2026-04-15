@@ -8,7 +8,7 @@ gameplay, in-game chat, a single-player AI mode, friends list, and leaderboard.
 ## Tech Stack
 
 **Network:** `Socket`, `ServerSocket`, `Thread`, `ObjectInputStream`, `ObjectOutputStream`  
-**GUI:** `JavaFX` ,  `Stage`, `Scene`, `GridPane`, `Button`, `Label`, `Circle`, `Rectangle`, `MouseEvent`, `EventHandler`  
+**GUI:** `JavaFX` — `Stage`, `Scene`, `GridPane`, `Button`, `Label`, `Circle`, `Rectangle`, `MouseEvent`, `EventHandler`  
 **Shared:** `Serializable` objects passed over the socket streams  
 **Database:** PostgreSQL (cloud-hosted) via JDBC (`org.postgresql:postgresql` driver), BCrypt for password hashing (`org.mindrot:jbcrypt`)
 
@@ -32,17 +32,19 @@ g) All scenes must be reachable; neither client nor server should freeze or cras
 
 | File | Responsibility |
 |---|---|
-| `GameMessage.java` | Serializable network protocol object sent over sockets. Contains a `MessageType` enum (MOVE, CHAT, USERNAME_OK, USERNAME_TAKEN, GAME_START, GAME_END, FORFEIT, REMATCH_REQUEST, REMATCH_ACCEPT, REMATCH_DECLINE, WAITING, DRAW_OFFER) and all relevant data fields. |
+| `GameMessage.java` | Serializable network protocol object sent over sockets. Contains a `MessageType` enum (MOVE, CHAT, DIRECT_MESSAGE, USERNAME_OK, USERNAME_TAKEN, GAME_START, GAME_END, FORFEIT, REMATCH_REQUEST, REMATCH_ACCEPT, REMATCH_DECLINE, WAITING, DRAW_OFFER, LEADERBOARD_REQUEST, LEADERBOARD_DATA) and all relevant data fields. |
 | `Move.java` | Represents a single checker move: fromRow/Col, toRow/Col, captured piece coordinates, and whether it's a multi-jump. |
+| `PieceColor.java` | Enum with two values: `RED` and `BLACK`. Used by `Piece`, `CheckersLogic`, and `AI`. |
 | `Piece.java` | Represents one checker piece: color (RED/BLACK), king status, and board position. |
-| `Board.java` | 8×8 board state as a `Piece[][]`. Methods to init, clone, get, and apply moves. Does NOT contain rules ,  pure state only. |
+| `Board.java` | 8×8 board state as a `Piece[][]`. Methods to init, clone, get, and apply moves. Does NOT contain rules — pure state only. |
+| `PlayerStats.java` | Plain data class holding a player's username, wins, losses, draws, and computed W/L ratio. Serialized inside `LEADERBOARD_DATA` messages. |
 
 ### Game Logic (pure, no UI, no network)
 
 | File | Responsibility |
 |---|---|
 | `CheckersLogic.java` | All game rules: compute valid moves, execute a move, detect captures, jump and multi-jumps, promote to king, check win/draw conditions. |
-| `AI.java` | Minimax-based AI opponent. Recursively evaluates board states up to a configurable depth, with alpha-beta pruning. Exposes `getBestMove(Board, PieceColor, int depth) Move`. Used only client-side for single-player mode, the server is not involved. |
+| `AI.java` | Minimax-based AI opponent. Constructed with a search depth; recursively evaluates board states with alpha-beta pruning. Exposes `getBestMove(Board, PieceColor) Move`. Used only client-side for single-player mode, the server is not involved. |
 
 ### Database (server-side only)
 
@@ -93,11 +95,11 @@ g) All scenes must be reachable; neither client nor server should freeze or cras
 | Register | Register form + "Already have an account? Login" link |
 | Menu | Find Game (Ranked), Casual Match, **Single Player**, Friends, **Leaderboard** buttons |
 | Game (Waiting) | Board grayed out, "Searching for opponent…" status, Cancel popup |
-| Game (Playing ,  Online) | Live board, player name headers, chat panel + message input, Forfeit button |
-| Game (Playing ,  vs AI) | Same layout; opponent label shows "AI (Easy/Medium/Hard)"; no chat panel |
+| Game (Playing — Online) | Live board, player name headers, chat panel + message input, Forfeit button |
+| Game (Playing — vs AI) | Same layout; opponent label shows "AI (Easy/Medium/Hard)"; no chat panel |
 | End-of-Game popup | Shows result (Win / Loss / Draw), Play Again and Quit buttons |
-| Forfeit popup | "Forfeit the match? You will lose 15p" ,  No / Yes |
-| Log Out popup | "Log out?" ,  No / Yes |
+| Forfeit popup | "Forfeit the match? You will lose 15p" — No / Yes |
+| Log Out popup | "Log out?" — No / Yes |
 | Friends | Friends list with online indicator, message input per friend |
 | Leaderboard | Ranked table: Rank, Username, Wins, Losses, W/L ratio |
 
@@ -279,6 +281,10 @@ classDiagram
     }
 
     %% ── Server ──────────────────────────────────────────────────
+    class ServerMain {
+        +main(String[] args)$
+    }
+
     class Server {
         -ServerSocket serverSocket
         -List~ClientHandler~ waitingClients
@@ -326,12 +332,18 @@ classDiagram
     class ServerApp {
         -TextArea logArea
         -ListView activeGamesList
+        -ListView connectedUsersList
         +start(Stage)
         +log(String)
         +refreshGamesList()
+        +refreshUsersList()
     }
 
     %% ── Client ──────────────────────────────────────────────────
+    class ClientMain {
+        +main(String[] args)$
+    }
+
     class Client {
         -Socket socket
         -ObjectInputStream in
@@ -436,11 +448,14 @@ classDiagram
     GameSession ..> GameMessage
     ClientHandler ..> GameMessage
     ServerApp ..> Server
+    ServerMain ..> Server
+    ServerMain ..> ServerApp
 
     AI ..> Board
     AI ..> Move
     AI ..> CheckersLogic
 
+    ClientMain ..> ClientApp
     ClientApp "1" *-- "1" Client
     ClientApp "1" --> "1" LoginController
     ClientApp "1" --> "1" MenuController
@@ -457,7 +472,17 @@ classDiagram
     LeaderboardController "1" *-- "0..*" PlayerStats
 ```
 
-## Key Design Decisions on AI
+---
 
-- **`AI` is client-only** single-player games never touch the server. `GameController` calls `triggerAIMove()` on a background thread after each player move, then applies the result via `Platform.runLater`.
-- **`AI` difficulty = search depth** Easy = depth 2, Medium = depth 4, Hard = depth 6. Alpha-beta pruning keeps Hard playable in real time.
+## Key Design Decisions
+
+- **`GameMessage` as the single protocol type** — all server↔client communication is one serializable object with a `MessageType` tag. This avoids instanceof chains and is easy to extend.
+- **`CheckersLogic` is stateless** — it takes a `Board` and returns results. This makes it trivially reusable for both server-side move validation and client-side move highlighting.
+- **`Board.clone()`** — the server validates moves on a clone before applying them to the real board, preventing cheating by a malformed message.
+- **`Platform.runLater` in `Client`** — all incoming messages are dispatched back onto the JavaFX Application Thread before touching any UI node.
+- **`ClientHandler` runs on its own thread** — the server never blocks waiting for one client while others are active.
+- **Scene switching in `ClientApp`** — one `Stage`, swap `Scene`s. Controllers hold a reference to `ClientApp` to trigger transitions.
+- **`AI` is client-only** — single-player games never touch the server. `GameController` calls `triggerAIMove()` on a background thread after each player move, then applies the result via `Platform.runLater`.
+- **`AI` difficulty = search depth** — Easy = depth 2, Medium = depth 4, Hard = depth 6. Alpha-beta pruning keeps Hard playable in real time.
+- **`PlayerStats` is a plain data class** — the server serializes stats into `GameMessage` payloads (new `LEADERBOARD_DATA` message type); the client deserializes and populates the `LeaderboardController` table.
+- **Friends list** is display-only for now; direct messaging reuses the same chat `GameMessage` infrastructure with a new `DIRECT_MESSAGE` type.
